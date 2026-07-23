@@ -5,7 +5,7 @@
  * production by implementing the same interface.
  */
 
-import type { Alert, CompanyConfig, RecoveryCase } from "./types.js";
+import type { Alert, CompanyConfig, RecoveryCase } from "./types";
 
 export interface RecoveryStore {
   getCase(id: string): Promise<RecoveryCase | null>;

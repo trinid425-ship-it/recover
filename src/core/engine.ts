@@ -14,14 +14,14 @@
  * deterministic and fully unit-testable.
  */
 
-import { MockMessenger, type Messenger } from "./messaging.js";
-import { caseId, InMemoryStore, type RecoveryStore } from "./store.js";
+import { MockMessenger, type Messenger } from "./messaging";
+import { caseId, InMemoryStore, type RecoveryStore } from "./store";
 import {
   renderTemplate,
   stepsForType,
   type SequenceStep,
-} from "./sequences.js";
-import { assessRisk } from "./atrisk.js";
+} from "./sequences";
+import { assessRisk } from "./atrisk";
 import {
   systemClock,
   type Alert,
@@ -32,7 +32,7 @@ import {
   type EngineEvent,
   type RecoveryCase,
   type RiskAssessment,
-} from "./types.js";
+} from "./types";
 
 export interface EngineDeps {
   store: RecoveryStore;

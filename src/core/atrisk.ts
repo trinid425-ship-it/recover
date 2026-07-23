@@ -9,7 +9,7 @@
  * this is the natural place to swap in a fitted model — the interface stays.
  */
 
-import type { EngagementSnapshot, RiskAssessment, RiskBand } from "./types.js";
+import type { EngagementSnapshot, RiskAssessment, RiskBand } from "./types";
 
 function bandFor(score: number): RiskBand {
   if (score >= 65) return "high";

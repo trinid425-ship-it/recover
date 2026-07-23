@@ -10,7 +10,7 @@
  *    subscription dunning benchmarks.
  */
 
-import type { CompanyConfig } from "./types.js";
+import type { CompanyConfig } from "./types";
 
 export interface SequenceStep {
   /** Hours after the initial payment failure this step fires. */

@@ -12,7 +12,7 @@
  *   3. Map into EngagementSnapshot and return.
  */
 
-import type { EngagementSnapshot } from "../core/types.js";
+import type { EngagementSnapshot } from "../core/types";
 
 export interface EngagementProvider {
   snapshots(companyId: string): Promise<EngagementSnapshot[]>;

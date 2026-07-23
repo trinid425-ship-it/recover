@@ -8,8 +8,8 @@
 
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { RecoveryStore } from "../core/store.js";
-import type { Alert, CompanyConfig, RecoveryCase } from "../core/types.js";
+import type { RecoveryStore } from "../core/store";
+import type { Alert, CompanyConfig, RecoveryCase } from "../core/types";
 
 interface Db {
   cases: Record<string, RecoveryCase>;

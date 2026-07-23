@@ -9,7 +9,7 @@
  *   payment.failed, payment.succeeded, membership.deactivated
  */
 
-import type { EngineEvent } from "../core/types.js";
+import type { EngineEvent } from "../core/types";
 
 type AnyRecord = Record<string, any>;
 

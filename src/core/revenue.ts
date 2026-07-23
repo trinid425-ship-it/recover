@@ -5,7 +5,7 @@
  * We compute it straight from case state so it is always defensible.
  */
 
-import type { RecoveryCase } from "./types.js";
+import type { RecoveryCase } from "./types";
 
 export interface RecoveryMetrics {
   recoveredCount: number;
