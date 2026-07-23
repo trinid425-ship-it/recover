@@ -1,0 +1,26 @@
+{
+  "name": "recover",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Recover — automated failed-payment (involuntary churn) recovery for Whop communities.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "simulate": "tsx test/simulate.ts",
+    "test": "tsx test/simulate.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@whop/sdk": "^0.0.42",
+    "next": "^15.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

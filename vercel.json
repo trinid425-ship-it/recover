@@ -1,0 +1,4 @@
+{
+  "//": "Vercel Hobby (free) allows crons ONLY once per day. The daily at-risk scan below is valid on free. The frequent dunning processor (/api/cron/process) is triggered by a free external scheduler instead (e.g. cron-job.org every 15 min) — see README 'Free hosting'.",
+  "crons": [{ "path": "/api/cron/at-risk", "schedule": "0 9 * * *" }]
+}
