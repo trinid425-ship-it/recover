@@ -15,10 +15,9 @@ export function whopClient(): Whop {
   if (!apiKey) throw new Error("WHOP_API_KEY is not set");
   _client = new Whop({
     apiKey,
-    // The SDK expects the webhook secret base64-encoded (Standard Webhooks).
-    webhookKey: process.env.WHOP_WEBHOOK_SECRET
-      ? Buffer.from(process.env.WHOP_WEBHOOK_SECRET).toString("base64")
-      : undefined,
+    // Pass the webhook secret raw — the SDK's unwrap() expects the unmodified
+    // signing secret (it also reads WHOP_WEBHOOK_SECRET from env by default).
+    webhookKey: process.env.WHOP_WEBHOOK_SECRET ?? undefined,
   });
   return _client;
 }
