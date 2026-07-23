@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 export const metadata = {
   title: "Recover — churn recovery for Whop",
   description: "Automatically recover failed-payment churn inside your whop.",
+  icons: { icon: "/icon-64.png", apple: "/icon-64.png" },
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

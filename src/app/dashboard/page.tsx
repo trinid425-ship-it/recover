@@ -96,6 +96,8 @@ export default async function Dashboard({
   return (
     <main style={{ padding: "32px 40px", maxWidth: 1040, margin: "0 auto" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4 }}>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src="/recover-icon.png" alt="Recover" width={34} height={34} />
         <span style={{ fontSize: 22, fontWeight: 700 }}>Recover</span>
         <span
           style={{
