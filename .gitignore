@@ -6,3 +6,4 @@ node_modules
 .DS_Store
 data/*.json
 public/_*.png
+store-assets/_*.png
