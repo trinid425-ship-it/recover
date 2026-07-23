@@ -62,9 +62,10 @@ function Stat({
 export default async function Dashboard({
   searchParams,
 }: {
-  searchParams: Promise<{ company?: string }>;
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 }) {
-  const { company } = await searchParams;
+  const sp = await searchParams;
+  const company = typeof sp.company === "string" ? sp.company : undefined;
   const store = getStore();
 
   let cases: RecoveryCase[];
