@@ -142,6 +142,8 @@ export function mapWebhook(
         amountCents: toCents(pick(data, "amount", "disputed_amount", "final_amount")),
         currency: (pick<string>(data, "currency") ?? "usd").toLowerCase(),
         occurredAt,
+        disputeId: pick<string>(data, "id", "dispute_id"),
+        paymentId: pick<string>(data, "payment_id", "payment.id"),
       };
     }
 

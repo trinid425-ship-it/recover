@@ -11,6 +11,7 @@
  */
 
 import { RecoveryEngine } from "../src/core/engine.js";
+import { MockEvidenceDrafter } from "../src/core/evidence.js";
 import { MockMessenger } from "../src/core/messaging.js";
 import { InMemoryStore } from "../src/core/store.js";
 import { computeMetrics } from "../src/core/revenue.js";
@@ -50,11 +51,13 @@ async function main() {
   const clock = new FakeClock(Date.parse("2026-07-01T00:00:00.000Z"));
   const store = new InMemoryStore();
   const messenger = new MockMessenger();
+  const evidenceDrafter = new MockEvidenceDrafter();
   const engine = new RecoveryEngine({
     store,
     messenger,
     clock,
     appBaseUrl: "https://recover.app",
+    evidenceDrafter,
   });
 
   await store.saveConfig({
@@ -205,6 +208,146 @@ async function main() {
   assert(
     alerts.some((a) => a.kind === "chargeback" && a.severity === "critical"),
     "chargeback alert stored as critical",
+  );
+  const chargebackAlert = alerts.find((a) => a.kind === "chargeback");
+  assert(
+    chargebackAlert?.evidenceStatus === "not_applicable",
+    "free tier: chargeback alert has evidenceStatus=not_applicable",
+  );
+  assert(
+    evidenceDrafter.drafted.length === 0,
+    "free tier: evidence drafter is never invoked",
+  );
+
+  console.log(
+    "\n\x1b[1mScenario D.2 — Recover Pro auto-drafts dispute evidence\x1b[0m",
+  );
+  const PRO_COMPANY = "biz_beta";
+  await store.saveConfig({
+    companyId: PRO_COMPANY,
+    enabled: true,
+    communityName: "Beta Circle",
+    tier: "pro",
+  });
+
+  const disputeEvt1: EngineEvent = {
+    kind: "dispute_created",
+    eventId: "evt_dispute_pro_1",
+    companyId: PRO_COMPANY,
+    membershipId: "mem_pro_1",
+    username: "pro_member",
+    amountCents: 19900,
+    currency: "usd",
+    occurredAt: clock.iso(),
+    disputeId: "dspt_pro_1",
+    paymentId: "pay_pro_1",
+  };
+  const dPro1 = await engine.handle(disputeEvt1);
+  assert(dPro1.action === "alert_created", "pro tier: dispute_created raises an alert");
+  assert(
+    evidenceDrafter.drafted.some((d) => d.disputeId === "dspt_pro_1"),
+    "pro tier: evidence auto-drafted for the dispute",
+  );
+  const proAlerts1 = await store.listAlertsByCompany(PRO_COMPANY);
+  const proAlert1 = proAlerts1.find((a) => a.disputeId === "dspt_pro_1");
+  assert(
+    proAlert1?.evidenceStatus === "drafted",
+    "pro tier: alert marked evidenceStatus=drafted",
+  );
+
+  // Failure path — drafter throws, alert should still be raised but flagged failed.
+  evidenceDrafter.shouldFail = true;
+  const disputeEvt2: EngineEvent = {
+    kind: "dispute_created",
+    eventId: "evt_dispute_pro_2",
+    companyId: PRO_COMPANY,
+    membershipId: "mem_pro_2",
+    username: "pro_member_2",
+    amountCents: 5900,
+    currency: "usd",
+    occurredAt: clock.iso(),
+    disputeId: "dspt_pro_2",
+  };
+  const dPro2 = await engine.handle(disputeEvt2);
+  assert(
+    dPro2.action === "alert_created",
+    "pro tier: alert still raised even if the draft call fails",
+  );
+  const proAlerts2 = await store.listAlertsByCompany(PRO_COMPANY);
+  const proAlert2 = proAlerts2.find((a) => a.disputeId === "dspt_pro_2");
+  assert(
+    proAlert2?.evidenceStatus === "failed",
+    "pro tier: draft failure recorded as evidenceStatus=failed",
+  );
+  evidenceDrafter.shouldFail = false;
+
+  // Retro-draft: a free-tier company gets a dispute (not_applicable), then upgrades.
+  const RETRO_COMPANY = "biz_gamma";
+  await store.saveConfig({
+    companyId: RETRO_COMPANY,
+    enabled: true,
+    communityName: "Gamma Guild",
+  });
+  const retroDisputeEvt: EngineEvent = {
+    kind: "dispute_created",
+    eventId: "evt_dispute_retro_1",
+    companyId: RETRO_COMPANY,
+    username: "retro_member",
+    amountCents: 3300,
+    currency: "usd",
+    occurredAt: clock.iso(),
+    disputeId: "dspt_retro_1",
+  };
+  await engine.handle(retroDisputeEvt);
+  const beforeUpgrade = await store.listAlertsByCompany(RETRO_COMPANY);
+  assert(
+    beforeUpgrade.find((a) => a.disputeId === "dspt_retro_1")?.evidenceStatus ===
+      "not_applicable",
+    "retro: dispute raised before upgrade has evidenceStatus=not_applicable",
+  );
+
+  await store.saveConfig({
+    companyId: RETRO_COMPANY,
+    enabled: true,
+    communityName: "Gamma Guild",
+    tier: "pro",
+  });
+  const draftedBeforeRetro = evidenceDrafter.drafted.length;
+  const retroResult = await engine.handle({
+    kind: "pro_tier_confirmed",
+    eventId: "evt_pro_confirmed_1",
+    companyId: RETRO_COMPANY,
+    occurredAt: clock.iso(),
+  });
+  assert(
+    retroResult.action === "evidence_retro_drafted",
+    "retro: pro_tier_confirmed retro-drafts pending disputes",
+  );
+  const afterUpgrade = await store.listAlertsByCompany(RETRO_COMPANY);
+  assert(
+    afterUpgrade.find((a) => a.disputeId === "dspt_retro_1")?.evidenceStatus ===
+      "drafted",
+    "retro: pending dispute is now marked evidenceStatus=drafted",
+  );
+  assert(
+    evidenceDrafter.drafted.length === draftedBeforeRetro + 1,
+    "retro: exactly one new draft was recorded",
+  );
+
+  // Dedup: running pro_tier_confirmed again should not re-draft already-drafted alerts.
+  const retroResult2 = await engine.handle({
+    kind: "pro_tier_confirmed",
+    eventId: "evt_pro_confirmed_2",
+    companyId: RETRO_COMPANY,
+    occurredAt: clock.iso(),
+  });
+  assert(
+    retroResult2.action === "noop",
+    "retro: re-running pro_tier_confirmed with nothing pending is a noop",
+  );
+  assert(
+    evidenceDrafter.drafted.length === draftedBeforeRetro + 1,
+    "retro: no duplicate draft calls on the second run",
   );
 
   console.log("\n\x1b[1mScenario E — at-risk scan flags a disengaged member\x1b[0m");

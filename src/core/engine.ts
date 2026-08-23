@@ -14,6 +14,7 @@
  * deterministic and fully unit-testable.
  */
 
+import type { DraftInput, EvidenceDrafter } from "./evidence";
 import { MockMessenger, type Messenger } from "./messaging";
 import { caseId, InMemoryStore, type RecoveryStore } from "./store";
 import {
@@ -32,6 +33,7 @@ import {
   type EngineEvent,
   type RecoveryCase,
   type RiskAssessment,
+  type Tier,
 } from "./types";
 
 export interface EngineDeps {
@@ -40,6 +42,8 @@ export interface EngineDeps {
   clock?: Clock;
   /** Base URL used to build the member's "update payment method" link. */
   appBaseUrl?: string;
+  /** Recover Pro: drafts dispute evidence automatically. Omit to disable. */
+  evidenceDrafter?: EvidenceDrafter;
 }
 
 export interface HandleResult {
@@ -54,6 +58,7 @@ export interface HandleResult {
     | "duplicate_ignored"
     | "no_case"
     | "step_sent"
+    | "evidence_retro_drafted"
     | "noop";
   alertId?: string;
 }
@@ -66,12 +71,14 @@ export class RecoveryEngine {
   private messenger: Messenger;
   private clock: Clock;
   private appBaseUrl: string;
+  private evidenceDrafter?: EvidenceDrafter;
 
   constructor(deps: EngineDeps) {
     this.store = deps.store;
     this.messenger = deps.messenger;
     this.clock = deps.clock ?? systemClock;
     this.appBaseUrl = deps.appBaseUrl ?? "https://whop.com";
+    this.evidenceDrafter = deps.evidenceDrafter;
   }
 
   /** Entry point for a normalized inbound event. */
@@ -87,6 +94,8 @@ export class RecoveryEngine {
         return this.onDisputeCreated(evt);
       case "refund_created":
         return this.onRefundCreated(evt);
+      case "pro_tier_confirmed":
+        return this.onProTierConfirmed(evt);
     }
   }
 
@@ -250,17 +259,95 @@ export class RecoveryEngine {
     evt: Extract<EngineEvent, { kind: "dispute_created" }>,
   ): Promise<HandleResult> {
     const who = evt.username ? `@${evt.username}` : "a member";
+    const cfg = await this.config(evt.companyId);
+    const tier: Tier = cfg?.tier ?? "free";
+
+    // Free tier (or no dispute id / no drafter wired) → plain alert, same as
+    // before. Pro tier auto-drafts evidence so the creator only has to review
+    // and submit before the response deadline.
+    let evidenceStatus: Alert["evidenceStatus"] = "not_applicable";
+    if (tier === "pro" && evt.disputeId && this.evidenceDrafter) {
+      try {
+        const relatedCase = evt.membershipId
+          ? await this.store.getCase(caseId(evt.companyId, evt.membershipId))
+          : null;
+        await this.evidenceDrafter.draft({
+          disputeId: evt.disputeId,
+          companyId: evt.companyId,
+          config: cfg,
+          relatedCase,
+          customerName: evt.username,
+        });
+        evidenceStatus = "drafted";
+      } catch {
+        evidenceStatus = "failed";
+      }
+    }
+
+    const detail =
+      evidenceStatus === "drafted"
+        ? `${who} opened a dispute. Recover auto-drafted evidence (access history + billing context) — review and submit it from the dashboard before the response deadline.`
+        : `${who} opened a dispute. Respond fast with access + usage evidence to avoid losing the funds and risking your payout standing.`;
+
     return this.raiseAlert({
       companyId: evt.companyId,
       kind: "chargeback",
       severity: "critical",
       title: "Chargeback opened",
-      detail: `${who} opened a dispute. Respond fast with access + usage evidence to avoid losing the funds and risking your payout standing.`,
+      detail,
       amountCents: evt.amountCents,
       currency: evt.currency,
       dedupe: evt.eventId,
       occurredAt: evt.occurredAt,
+      disputeId: evt.disputeId,
+      evidenceStatus,
     });
+  }
+
+  /**
+   * Retro-drafts evidence for any open, un-drafted chargeback alerts once a
+   * company confirms its Recover Pro upgrade (e.g. mid-dispute).
+   */
+  private async onProTierConfirmed(
+    evt: Extract<EngineEvent, { kind: "pro_tier_confirmed" }>,
+  ): Promise<HandleResult> {
+    if (!this.evidenceDrafter) {
+      return { applied: false, action: "noop" };
+    }
+
+    const alerts = await this.store.listAlertsByCompany(evt.companyId);
+    const pending = alerts.filter(
+      (a) =>
+        a.kind === "chargeback" &&
+        a.disputeId &&
+        a.evidenceStatus !== "drafted",
+    );
+    if (pending.length === 0) {
+      return { applied: false, action: "noop" };
+    }
+
+    const cfg = await this.config(evt.companyId);
+    let draftedAny = false;
+    for (const a of pending) {
+      try {
+        await this.evidenceDrafter.draft({
+          disputeId: a.disputeId!,
+          companyId: evt.companyId,
+          config: cfg,
+          relatedCase: null,
+        });
+        a.evidenceStatus = "drafted";
+        draftedAny = true;
+      } catch {
+        a.evidenceStatus = "failed";
+      }
+      await this.store.saveAlert(a);
+    }
+
+    return {
+      applied: draftedAny,
+      action: draftedAny ? "evidence_retro_drafted" : "noop",
+    };
   }
 
   private async onRefundCreated(
@@ -290,6 +377,8 @@ export class RecoveryEngine {
     currency?: string;
     dedupe: string;
     occurredAt: string;
+    disputeId?: string;
+    evidenceStatus?: Alert["evidenceStatus"];
   }): Promise<HandleResult> {
     const alertId = `al_${input.companyId}_${input.dedupe}`;
     const existing = await this.store.getAlert(alertId);
@@ -307,6 +396,8 @@ export class RecoveryEngine {
       currency: input.currency,
       createdAt: input.occurredAt,
       acknowledged: false,
+      disputeId: input.disputeId,
+      evidenceStatus: input.evidenceStatus,
     };
     await this.store.saveAlert(alert);
     return { applied: true, action: "alert_created", alertId };

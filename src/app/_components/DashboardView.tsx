@@ -7,7 +7,7 @@
 
 import { computeMetrics } from "@/core/revenue";
 import { formatAmount } from "@/core/sequences";
-import type { Alert, RecoveryCase } from "@/core/types";
+import type { Alert, RecoveryCase, Tier } from "@/core/types";
 
 const STATUS_STYLE: Record<string, { bg: string; fg: string; label: string }> = {
   recovered: { bg: "#0f2e1c", fg: "#4ade80", label: "Recovered" },
@@ -20,6 +20,12 @@ const ALERT_STYLE: Record<string, { fg: string; dot: string }> = {
   chargeback: { fg: "#f87171", dot: "#ef4444" },
   refund: { fg: "#fbbf24", dot: "#f59e0b" },
   at_risk: { fg: "#7c9cff", dot: "#6366f1" },
+};
+
+const EVIDENCE_PILL: Record<string, { bg: string; fg: string; label: string }> = {
+  drafted: { bg: "#0f2e1c", fg: "#4ade80", label: "✓ Evidence auto-drafted" },
+  failed: { bg: "#2a1315", fg: "#f87171", label: "Auto-draft failed" },
+  not_applicable: { bg: "#1b1f27", fg: "#9aa4b2", label: "Upgrade to Pro for auto-evidence" },
 };
 
 function Stat({
@@ -58,9 +64,11 @@ function Stat({
 export function DashboardView({
   cases,
   alerts,
+  tier = "free",
 }: {
   cases: RecoveryCase[];
   alerts: Alert[];
+  tier?: Tier;
 }) {
   const recoveryCases = cases.filter((c) => c.type === "involuntary");
   const winbackCases = cases.filter((c) => c.type === "winback");
@@ -92,6 +100,20 @@ export function DashboardView({
           }}
         >
           churn recovery
+        </span>
+        <span
+          style={{
+            fontSize: 11,
+            fontWeight: 700,
+            letterSpacing: 0.4,
+            color: tier === "pro" ? "#0b0f14" : "#9aa4b2",
+            background: tier === "pro" ? "#4ade80" : "#1b1f27",
+            border: tier === "pro" ? "none" : "1px solid #2a3040",
+            borderRadius: 999,
+            padding: "3px 10px",
+          }}
+        >
+          {tier === "pro" ? "PRO" : "FREE"}
         </span>
       </div>
       <p style={{ color: "#8b95a5", marginTop: 0, marginBottom: 24 }}>
@@ -136,6 +158,21 @@ export function DashboardView({
                   {a.amountCents ? (
                     <span style={{ color: "#e8ebf0", fontSize: 14 }}>
                       {" "}· {formatAmount(a.amountCents, a.currency ?? "usd")}
+                    </span>
+                  ) : null}
+                  {a.kind === "chargeback" && a.evidenceStatus ? (
+                    <span
+                      style={{
+                        marginLeft: 8,
+                        fontSize: 11,
+                        fontWeight: 600,
+                        borderRadius: 999,
+                        padding: "2px 8px",
+                        background: EVIDENCE_PILL[a.evidenceStatus]?.bg,
+                        color: EVIDENCE_PILL[a.evidenceStatus]?.fg,
+                      }}
+                    >
+                      {EVIDENCE_PILL[a.evidenceStatus]?.label}
                     </span>
                   ) : null}
                   <div style={{ color: "#8b95a5", fontSize: 13, marginTop: 2 }}>

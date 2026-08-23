@@ -9,6 +9,7 @@
 
 import { DashboardView } from "@/app/_components/DashboardView";
 import { accessLevel, verifyWhopViewer } from "@/lib/auth";
+import { cachedTier, syncProTier } from "@/lib/plan";
 import { getStore } from "@/lib/runtime";
 
 export const dynamic = "force-dynamic";
@@ -52,10 +53,11 @@ export default async function CompanyDashboard({
   }
 
   const store = getStore();
-  const [cases, alerts] = await Promise.all([
+  const [cases, alerts, tier] = await Promise.all([
     store.listCasesByCompany(companyId),
     store.listAlertsByCompany(companyId),
+    syncProTier(store, companyId).catch(() => cachedTier(store, companyId)),
   ]);
 
-  return <DashboardView cases={cases} alerts={alerts} />;
+  return <DashboardView cases={cases} alerts={alerts} tier={tier} />;
 }

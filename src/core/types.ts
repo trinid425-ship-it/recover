@@ -63,6 +63,9 @@ export interface RecoveryCase {
   appliedEventIds: string[];
 }
 
+/** Recover's own subscription tier for the installing company. */
+export type Tier = "free" | "pro";
+
 /** Per-company configuration, editable by the creator in the dashboard. */
 export interface CompanyConfig {
   companyId: string;
@@ -72,6 +75,12 @@ export interface CompanyConfig {
   stepOffsetsHours?: number[];
   /** Optional custom copy per step; falls back to defaults. */
   customTemplates?: string[];
+  /** Recover Pro unlocks automated dispute-evidence drafting. Defaults to "free". */
+  tier?: Tier;
+  /** Policy text used to draft dispute evidence; falls back to sensible defaults. */
+  refundPolicyDisclosure?: string;
+  cancellationPolicyDisclosure?: string;
+  productDescription?: string;
 }
 
 /** Normalized inbound event the engine understands (mapped from Whop webhooks). */
@@ -119,6 +128,10 @@ export type EngineEvent =
       amountCents: number;
       currency: string;
       occurredAt: string;
+      /** The dispute this event concerns — needed to draft/submit evidence. */
+      disputeId?: string;
+      /** The disputed payment, if the webhook included it. */
+      paymentId?: string;
     }
   | {
       kind: "refund_created";
@@ -128,6 +141,17 @@ export type EngineEvent =
       username?: string;
       amountCents: number;
       currency: string;
+      occurredAt: string;
+    }
+  | {
+      /**
+       * Fired when a company's Recover Pro purchase is confirmed (e.g. after
+       * checkout completes). Retro-drafts evidence for any open disputes that
+       * were raised before the upgrade landed.
+       */
+      kind: "pro_tier_confirmed";
+      eventId: string;
+      companyId: string;
       occurredAt: string;
     };
 
@@ -149,6 +173,26 @@ export interface Alert {
   currency?: string;
   createdAt: string; // ISO
   acknowledged: boolean;
+  /** Present on "chargeback" alerts — links back to the Whop dispute. */
+  disputeId?: string;
+  /** Whether Recover Pro auto-drafted evidence for this dispute. */
+  evidenceStatus?: "drafted" | "failed" | "not_applicable";
+}
+
+// ── Dispute evidence (Pro) ───────────────────────────────────────────────────
+// Recover Pro auto-drafts (never auto-submits) dispute evidence so a creator
+// only has to review and hit submit before the response deadline.
+
+export interface DisputeEvidenceDraft {
+  disputeId: string;
+  companyId: string;
+  productDescription: string;
+  refundPolicyDisclosure: string;
+  cancellationPolicyDisclosure: string;
+  customerEmailAddress?: string;
+  customerName?: string;
+  serviceDate?: string;
+  notes: string;
 }
 
 // ── At-risk detection ────────────────────────────────────────────────────────

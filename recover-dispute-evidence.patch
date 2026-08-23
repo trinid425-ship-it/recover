@@ -1,0 +1,911 @@
+diff --git a/src/app/_components/DashboardView.tsx b/src/app/_components/DashboardView.tsx
+index 5ebfc18..b95f20c 100644
+--- a/src/app/_components/DashboardView.tsx
++++ b/src/app/_components/DashboardView.tsx
+@@ -7,7 +7,7 @@
+ 
+ import { computeMetrics } from "@/core/revenue";
+ import { formatAmount } from "@/core/sequences";
+-import type { Alert, RecoveryCase } from "@/core/types";
++import type { Alert, RecoveryCase, Tier } from "@/core/types";
+ 
+ const STATUS_STYLE: Record<string, { bg: string; fg: string; label: string }> = {
+   recovered: { bg: "#0f2e1c", fg: "#4ade80", label: "Recovered" },
+@@ -22,6 +22,12 @@ const ALERT_STYLE: Record<string, { fg: string; dot: string }> = {
+   at_risk: { fg: "#7c9cff", dot: "#6366f1" },
+ };
+ 
++const EVIDENCE_PILL: Record<string, { bg: string; fg: string; label: string }> = {
++  drafted: { bg: "#0f2e1c", fg: "#4ade80", label: "✓ Evidence auto-drafted" },
++  failed: { bg: "#2a1315", fg: "#f87171", label: "Auto-draft failed" },
++  not_applicable: { bg: "#1b1f27", fg: "#9aa4b2", label: "Upgrade to Pro for auto-evidence" },
++};
++
+ function Stat({
+   label,
+   value,
+@@ -58,9 +64,11 @@ function Stat({
+ export function DashboardView({
+   cases,
+   alerts,
++  tier = "free",
+ }: {
+   cases: RecoveryCase[];
+   alerts: Alert[];
++  tier?: Tier;
+ }) {
+   const recoveryCases = cases.filter((c) => c.type === "involuntary");
+   const winbackCases = cases.filter((c) => c.type === "winback");
+@@ -93,6 +101,20 @@ export function DashboardView({
+         >
+           churn recovery
+         </span>
++        <span
++          style={{
++            fontSize: 11,
++            fontWeight: 700,
++            letterSpacing: 0.4,
++            color: tier === "pro" ? "#0b0f14" : "#9aa4b2",
++            background: tier === "pro" ? "#4ade80" : "#1b1f27",
++            border: tier === "pro" ? "none" : "1px solid #2a3040",
++            borderRadius: 999,
++            padding: "3px 10px",
++          }}
++        >
++          {tier === "pro" ? "PRO" : "FREE"}
++        </span>
+       </div>
+       <p style={{ color: "#8b95a5", marginTop: 0, marginBottom: 24 }}>
+         Failed payments recovered, members won back, and risks flagged —
+@@ -138,6 +160,21 @@ export function DashboardView({
+                       {" "}· {formatAmount(a.amountCents, a.currency ?? "usd")}
+                     </span>
+                   ) : null}
++                  {a.kind === "chargeback" && a.evidenceStatus ? (
++                    <span
++                      style={{
++                        marginLeft: 8,
++                        fontSize: 11,
++                        fontWeight: 600,
++                        borderRadius: 999,
++                        padding: "2px 8px",
++                        background: EVIDENCE_PILL[a.evidenceStatus]?.bg,
++                        color: EVIDENCE_PILL[a.evidenceStatus]?.fg,
++                      }}
++                    >
++                      {EVIDENCE_PILL[a.evidenceStatus]?.label}
++                    </span>
++                  ) : null}
+                   <div style={{ color: "#8b95a5", fontSize: 13, marginTop: 2 }}>
+                     {a.detail}
+                   </div>
+diff --git a/src/app/api/disputes/[disputeId]/submit/route.ts b/src/app/api/disputes/[disputeId]/submit/route.ts
+new file mode 100644
+index 0000000..4fa5ad2
+--- /dev/null
++++ b/src/app/api/disputes/[disputeId]/submit/route.ts
+@@ -0,0 +1,61 @@
++/**
++ * Submit dispute evidence — the one irreversible step in the flow.
++ *
++ * Recover Pro only ever *drafts* evidence automatically (src/lib/disputes.ts,
++ * via the safe/reversible `updateEvidence` call). Actually submitting the
++ * dispute to the payment processor for review must be a deliberate,
++ * admin-gated action taken from the dashboard — this route is that action.
++ *
++ * Admin check: we don't have the company id in the URL, so we look it up from
++ * the dispute itself, then confirm the calling viewer is an admin of that
++ * company before allowing the submit.
++ */
++
++import type { NextRequest } from "next/server";
++import { accessLevel, verifyWhopViewer } from "@/lib/auth";
++import { whopClient } from "@/lib/whop";
++
++export async function POST(
++  _request: NextRequest,
++  { params }: { params: Promise<{ disputeId: string }> },
++): Promise<Response> {
++  const { disputeId } = await params;
++
++  const viewer = await verifyWhopViewer();
++  if (!viewer) {
++    return Response.json({ error: "unauthenticated" }, { status: 401 });
++  }
++
++  let dispute: any;
++  try {
++    // Loosely typed — see WhopMessenger/WhopEvidenceDrafter for why.
++    dispute = await (whopClient() as any).disputes.retrieve(disputeId);
++  } catch (err) {
++    return Response.json({ error: "dispute not found" }, { status: 404 });
++  }
++
++  const companyId = dispute?.company?.id;
++  if (!companyId) {
++    return Response.json({ error: "dispute has no associated company" }, { status: 404 });
++  }
++
++  const level = await accessLevel(viewer.userId, companyId);
++  if (level !== "admin") {
++    return Response.json({ error: "admins only" }, { status: 403 });
++  }
++
++  if (dispute.editable === false) {
++    return Response.json(
++      { error: "this dispute is no longer editable — it may already be submitted or closed" },
++      { status: 409 },
++    );
++  }
++
++  try {
++    const submitted = await (whopClient() as any).disputes.submitEvidence(disputeId);
++    return Response.json({ ok: true, dispute: submitted });
++  } catch (err) {
++    console.error("[recover] dispute submit error", err);
++    return Response.json({ error: "submit failed" }, { status: 500 });
++  }
++}
+diff --git a/src/app/dashboard/[companyId]/page.tsx b/src/app/dashboard/[companyId]/page.tsx
+index 28b97c8..dc9a2ce 100644
+--- a/src/app/dashboard/[companyId]/page.tsx
++++ b/src/app/dashboard/[companyId]/page.tsx
+@@ -9,6 +9,7 @@
+ 
+ import { DashboardView } from "@/app/_components/DashboardView";
+ import { accessLevel, verifyWhopViewer } from "@/lib/auth";
++import { cachedTier, syncProTier } from "@/lib/plan";
+ import { getStore } from "@/lib/runtime";
+ 
+ export const dynamic = "force-dynamic";
+@@ -52,10 +53,11 @@ export default async function CompanyDashboard({
+   }
+ 
+   const store = getStore();
+-  const [cases, alerts] = await Promise.all([
++  const [cases, alerts, tier] = await Promise.all([
+     store.listCasesByCompany(companyId),
+     store.listAlertsByCompany(companyId),
++    syncProTier(store, companyId).catch(() => cachedTier(store, companyId)),
+   ]);
+ 
+-  return <DashboardView cases={cases} alerts={alerts} />;
++  return <DashboardView cases={cases} alerts={alerts} tier={tier} />;
+ }
+diff --git a/src/core/engine.ts b/src/core/engine.ts
+index 9d28679..8742fa1 100644
+--- a/src/core/engine.ts
++++ b/src/core/engine.ts
+@@ -14,6 +14,7 @@
+  * deterministic and fully unit-testable.
+  */
+ 
++import type { DraftInput, EvidenceDrafter } from "./evidence";
+ import { MockMessenger, type Messenger } from "./messaging";
+ import { caseId, InMemoryStore, type RecoveryStore } from "./store";
+ import {
+@@ -32,6 +33,7 @@ import {
+   type EngineEvent,
+   type RecoveryCase,
+   type RiskAssessment,
++  type Tier,
+ } from "./types";
+ 
+ export interface EngineDeps {
+@@ -40,6 +42,8 @@ export interface EngineDeps {
+   clock?: Clock;
+   /** Base URL used to build the member's "update payment method" link. */
+   appBaseUrl?: string;
++  /** Recover Pro: drafts dispute evidence automatically. Omit to disable. */
++  evidenceDrafter?: EvidenceDrafter;
+ }
+ 
+ export interface HandleResult {
+@@ -54,6 +58,7 @@ export interface HandleResult {
+     | "duplicate_ignored"
+     | "no_case"
+     | "step_sent"
++    | "evidence_retro_drafted"
+     | "noop";
+   alertId?: string;
+ }
+@@ -66,12 +71,14 @@ export class RecoveryEngine {
+   private messenger: Messenger;
+   private clock: Clock;
+   private appBaseUrl: string;
++  private evidenceDrafter?: EvidenceDrafter;
+ 
+   constructor(deps: EngineDeps) {
+     this.store = deps.store;
+     this.messenger = deps.messenger;
+     this.clock = deps.clock ?? systemClock;
+     this.appBaseUrl = deps.appBaseUrl ?? "https://whop.com";
++    this.evidenceDrafter = deps.evidenceDrafter;
+   }
+ 
+   /** Entry point for a normalized inbound event. */
+@@ -87,6 +94,8 @@ export class RecoveryEngine {
+         return this.onDisputeCreated(evt);
+       case "refund_created":
+         return this.onRefundCreated(evt);
++      case "pro_tier_confirmed":
++        return this.onProTierConfirmed(evt);
+     }
+   }
+ 
+@@ -250,19 +259,97 @@ export class RecoveryEngine {
+     evt: Extract<EngineEvent, { kind: "dispute_created" }>,
+   ): Promise<HandleResult> {
+     const who = evt.username ? `@${evt.username}` : "a member";
++    const cfg = await this.config(evt.companyId);
++    const tier: Tier = cfg?.tier ?? "free";
++
++    // Free tier (or no dispute id / no drafter wired) → plain alert, same as
++    // before. Pro tier auto-drafts evidence so the creator only has to review
++    // and submit before the response deadline.
++    let evidenceStatus: Alert["evidenceStatus"] = "not_applicable";
++    if (tier === "pro" && evt.disputeId && this.evidenceDrafter) {
++      try {
++        const relatedCase = evt.membershipId
++          ? await this.store.getCase(caseId(evt.companyId, evt.membershipId))
++          : null;
++        await this.evidenceDrafter.draft({
++          disputeId: evt.disputeId,
++          companyId: evt.companyId,
++          config: cfg,
++          relatedCase,
++          customerName: evt.username,
++        });
++        evidenceStatus = "drafted";
++      } catch {
++        evidenceStatus = "failed";
++      }
++    }
++
++    const detail =
++      evidenceStatus === "drafted"
++        ? `${who} opened a dispute. Recover auto-drafted evidence (access history + billing context) — review and submit it from the dashboard before the response deadline.`
++        : `${who} opened a dispute. Respond fast with access + usage evidence to avoid losing the funds and risking your payout standing.`;
++
+     return this.raiseAlert({
+       companyId: evt.companyId,
+       kind: "chargeback",
+       severity: "critical",
+       title: "Chargeback opened",
+-      detail: `${who} opened a dispute. Respond fast with access + usage evidence to avoid losing the funds and risking your payout standing.`,
++      detail,
+       amountCents: evt.amountCents,
+       currency: evt.currency,
+       dedupe: evt.eventId,
+       occurredAt: evt.occurredAt,
++      disputeId: evt.disputeId,
++      evidenceStatus,
+     });
+   }
+ 
++  /**
++   * Retro-drafts evidence for any open, un-drafted chargeback alerts once a
++   * company confirms its Recover Pro upgrade (e.g. mid-dispute).
++   */
++  private async onProTierConfirmed(
++    evt: Extract<EngineEvent, { kind: "pro_tier_confirmed" }>,
++  ): Promise<HandleResult> {
++    if (!this.evidenceDrafter) {
++      return { applied: false, action: "noop" };
++    }
++
++    const alerts = await this.store.listAlertsByCompany(evt.companyId);
++    const pending = alerts.filter(
++      (a) =>
++        a.kind === "chargeback" &&
++        a.disputeId &&
++        a.evidenceStatus !== "drafted",
++    );
++    if (pending.length === 0) {
++      return { applied: false, action: "noop" };
++    }
++
++    const cfg = await this.config(evt.companyId);
++    let draftedAny = false;
++    for (const a of pending) {
++      try {
++        await this.evidenceDrafter.draft({
++          disputeId: a.disputeId!,
++          companyId: evt.companyId,
++          config: cfg,
++          relatedCase: null,
++        });
++        a.evidenceStatus = "drafted";
++        draftedAny = true;
++      } catch {
++        a.evidenceStatus = "failed";
++      }
++      await this.store.saveAlert(a);
++    }
++
++    return {
++      applied: draftedAny,
++      action: draftedAny ? "evidence_retro_drafted" : "noop",
++    };
++  }
++
+   private async onRefundCreated(
+     evt: Extract<EngineEvent, { kind: "refund_created" }>,
+   ): Promise<HandleResult> {
+@@ -290,6 +377,8 @@ export class RecoveryEngine {
+     currency?: string;
+     dedupe: string;
+     occurredAt: string;
++    disputeId?: string;
++    evidenceStatus?: Alert["evidenceStatus"];
+   }): Promise<HandleResult> {
+     const alertId = `al_${input.companyId}_${input.dedupe}`;
+     const existing = await this.store.getAlert(alertId);
+@@ -307,6 +396,8 @@ export class RecoveryEngine {
+       currency: input.currency,
+       createdAt: input.occurredAt,
+       acknowledged: false,
++      disputeId: input.disputeId,
++      evidenceStatus: input.evidenceStatus,
+     };
+     await this.store.saveAlert(alert);
+     return { applied: true, action: "alert_created", alertId };
+diff --git a/src/core/evidence.ts b/src/core/evidence.ts
+new file mode 100644
+index 0000000..54cfcd7
+--- /dev/null
++++ b/src/core/evidence.ts
+@@ -0,0 +1,97 @@
++/**
++ * Dispute evidence drafting (Recover Pro).
++ *
++ * Mirrors the sequences.ts / atrisk.ts pattern: a pure, fully-testable
++ * `buildEvidenceDraft()` function plus a pluggable `EvidenceDrafter`
++ * interface. The real implementation (src/lib/disputes.ts) calls Whop's
++ * "update evidence" endpoint — a safe, reversible draft. Nothing here ever
++ * submits a dispute; only the creator, from the dashboard, does that.
++ */
++
++import {
++  DEFAULT_CANCELLATION_POLICY_DISCLOSURE,
++  DEFAULT_REFUND_POLICY_DISCLOSURE,
++} from "../lib/constants";
++import type { CompanyConfig, DisputeEvidenceDraft, RecoveryCase } from "./types";
++
++export interface DraftInput {
++  disputeId: string;
++  companyId: string;
++  config: CompanyConfig | null;
++  /** The recovery case tied to this member/membership, if one is on file. */
++  relatedCase: RecoveryCase | null;
++  customerEmailAddress?: string;
++  customerName?: string;
++}
++
++/** Pure composition of an evidence draft from case history + policy config. */
++export function buildEvidenceDraft(input: DraftInput): DisputeEvidenceDraft {
++  const cfg = input.config;
++  const community = cfg?.communityName ?? "our community";
++  const c = input.relatedCase;
++
++  const productDescription =
++    cfg?.productDescription ??
++    (c
++      ? `Recurring membership access to ${community} (${c.planName}).`
++      : `Recurring membership access to ${community}.`);
++
++  const refundPolicyDisclosure =
++    cfg?.refundPolicyDisclosure ?? DEFAULT_REFUND_POLICY_DISCLOSURE;
++  const cancellationPolicyDisclosure =
++    cfg?.cancellationPolicyDisclosure ?? DEFAULT_CANCELLATION_POLICY_DISCLOSURE;
++
++  const notesLines: string[] = [];
++  if (c) {
++    const who = c.member.username ? `@${c.member.username}` : c.member.userId;
++    notesLines.push(
++      `Member ${who} held a "${c.planName}" membership in ${community}.`,
++    );
++    notesLines.push(
++      `Recover's records show ${c.messageLog.length} billing-related touch(es) logged for this membership; case status at time of dispute: ${c.status}.`,
++    );
++    if (c.status === "recovered" && c.recoveredAt) {
++      notesLines.push(
++        `Payment succeeded on ${c.recoveredAt}, after a prior failed attempt was resolved directly by the member.`,
++      );
++    }
++  } else {
++    notesLines.push(
++      "No open recovery case was on file for this member at the time of the dispute — the membership was in good standing.",
++    );
++  }
++  notesLines.push(
++    "Access to the product was granted immediately upon payment and remained active through the disputed billing period.",
++  );
++
++  return {
++    disputeId: input.disputeId,
++    companyId: input.companyId,
++    productDescription,
++    refundPolicyDisclosure,
++    cancellationPolicyDisclosure,
++    customerEmailAddress: input.customerEmailAddress,
++    customerName: input.customerName,
++    serviceDate: c?.failedAt,
++    notes: notesLines.join(" "),
++  };
++}
++
++export interface EvidenceDrafter {
++  draft(input: DraftInput): Promise<DisputeEvidenceDraft>;
++}
++
++/** In-memory drafter for tests — records drafts, can be told to fail on demand. */
++export class MockEvidenceDrafter implements EvidenceDrafter {
++  public drafted: DisputeEvidenceDraft[] = [];
++  public shouldFail = false;
++
++  async draft(input: DraftInput): Promise<DisputeEvidenceDraft> {
++    if (this.shouldFail) {
++      throw new Error("mock evidence draft failure");
++    }
++    const draft = buildEvidenceDraft(input);
++    this.drafted.push(draft);
++    return draft;
++  }
++}
+diff --git a/src/core/types.ts b/src/core/types.ts
+index f4b65d3..38660a8 100644
+--- a/src/core/types.ts
++++ b/src/core/types.ts
+@@ -63,6 +63,9 @@ export interface RecoveryCase {
+   appliedEventIds: string[];
+ }
+ 
++/** Recover's own subscription tier for the installing company. */
++export type Tier = "free" | "pro";
++
+ /** Per-company configuration, editable by the creator in the dashboard. */
+ export interface CompanyConfig {
+   companyId: string;
+@@ -72,6 +75,12 @@ export interface CompanyConfig {
+   stepOffsetsHours?: number[];
+   /** Optional custom copy per step; falls back to defaults. */
+   customTemplates?: string[];
++  /** Recover Pro unlocks automated dispute-evidence drafting. Defaults to "free". */
++  tier?: Tier;
++  /** Policy text used to draft dispute evidence; falls back to sensible defaults. */
++  refundPolicyDisclosure?: string;
++  cancellationPolicyDisclosure?: string;
++  productDescription?: string;
+ }
+ 
+ /** Normalized inbound event the engine understands (mapped from Whop webhooks). */
+@@ -119,6 +128,10 @@ export type EngineEvent =
+       amountCents: number;
+       currency: string;
+       occurredAt: string;
++      /** The dispute this event concerns — needed to draft/submit evidence. */
++      disputeId?: string;
++      /** The disputed payment, if the webhook included it. */
++      paymentId?: string;
+     }
+   | {
+       kind: "refund_created";
+@@ -129,6 +142,17 @@ export type EngineEvent =
+       amountCents: number;
+       currency: string;
+       occurredAt: string;
++    }
++  | {
++      /**
++       * Fired when a company's Recover Pro purchase is confirmed (e.g. after
++       * checkout completes). Retro-drafts evidence for any open disputes that
++       * were raised before the upgrade landed.
++       */
++      kind: "pro_tier_confirmed";
++      eventId: string;
++      companyId: string;
++      occurredAt: string;
+     };
+ 
+ // ── Alerts ─────────────────────────────────────────────────────────────────
+@@ -149,6 +173,26 @@ export interface Alert {
+   currency?: string;
+   createdAt: string; // ISO
+   acknowledged: boolean;
++  /** Present on "chargeback" alerts — links back to the Whop dispute. */
++  disputeId?: string;
++  /** Whether Recover Pro auto-drafted evidence for this dispute. */
++  evidenceStatus?: "drafted" | "failed" | "not_applicable";
++}
++
++// ── Dispute evidence (Pro) ───────────────────────────────────────────────────
++// Recover Pro auto-drafts (never auto-submits) dispute evidence so a creator
++// only has to review and hit submit before the response deadline.
++
++export interface DisputeEvidenceDraft {
++  disputeId: string;
++  companyId: string;
++  productDescription: string;
++  refundPolicyDisclosure: string;
++  cancellationPolicyDisclosure: string;
++  customerEmailAddress?: string;
++  customerName?: string;
++  serviceDate?: string;
++  notes: string;
+ }
+ 
+ // ── At-risk detection ────────────────────────────────────────────────────────
+diff --git a/src/lib/constants.ts b/src/lib/constants.ts
+new file mode 100644
+index 0000000..1b27d71
+--- /dev/null
++++ b/src/lib/constants.ts
+@@ -0,0 +1,23 @@
++/**
++ * Cross-cutting constants for Recover's own Pro plan (sold on Recover's own
++ * Whop — Duane's company) and default dispute-evidence copy used when a
++ * company hasn't configured its own policy text yet.
++ */
++
++/** The plan a company purchases to unlock Recover Pro (auto dispute evidence). */
++export const PRO_PLAN_ID = "plan_STPCMIgYeQ6Gm";
++/** The product Recover Pro is sold under. */
++export const PRO_PRODUCT_ID = "prod_fRhayeY2wkUgA";
++/** Recover's own company — memberships for the Pro plan live here. */
++export const PRO_COMPANY_ID = "biz_BsRjChoeabnFm3";
++
++export const DEFAULT_REFUND_POLICY_DISCLOSURE =
++  "Refunds are available per the community's stated policy at time of purchase. " +
++  "The member retained uninterrupted access to the product for the full billing " +
++  "period in question and did not request a refund through any Whop-supported " +
++  "channel prior to filing this dispute.";
++
++export const DEFAULT_CANCELLATION_POLICY_DISCLOSURE =
++  "Members may cancel at any time from their Whop account settings, which " +
++  "immediately stops future billing. No cancellation request was received " +
++  "from this member prior to the disputed charge.";
+diff --git a/src/lib/disputes.ts b/src/lib/disputes.ts
+new file mode 100644
+index 0000000..e1ada03
+--- /dev/null
++++ b/src/lib/disputes.ts
+@@ -0,0 +1,42 @@
++/**
++ * WhopEvidenceDrafter — drafts real dispute evidence via the Whop API.
++ *
++ * Calls `disputes.updateEvidence`, a safe, reversible PATCH-style call
++ * (verified against the live API: it's the correct method name, distinct
++ * from `disputes.submitEvidence`). This class NEVER calls submitEvidence —
++ * submission is irreversible and only ever triggered by the creator from the
++ * dashboard, via /api/disputes/[disputeId]/submit.
++ *
++ * The client is loosely typed (same pattern as WhopMessenger in
++ * core/messaging.ts) so this file has no hard compile dependency on the
++ * SDK's evolving generics.
++ *
++ * Docs: https://docs.whop.com (Disputes — update evidence / submit evidence)
++ */
++
++import { buildEvidenceDraft, type DraftInput, type EvidenceDrafter } from "../core/evidence";
++import type { DisputeEvidenceDraft } from "../core/types";
++
++export interface WhopDisputesLike {
++  disputes: {
++    updateEvidence(id: string, body: Record<string, unknown>): Promise<unknown>;
++  };
++}
++
++export class WhopEvidenceDrafter implements EvidenceDrafter {
++  constructor(private client: WhopDisputesLike) {}
++
++  async draft(input: DraftInput): Promise<DisputeEvidenceDraft> {
++    const draft = buildEvidenceDraft(input);
++    await this.client.disputes.updateEvidence(draft.disputeId, {
++      product_description: draft.productDescription,
++      refund_policy_disclosure: draft.refundPolicyDisclosure,
++      cancellation_policy_disclosure: draft.cancellationPolicyDisclosure,
++      customer_email_address: draft.customerEmailAddress ?? null,
++      customer_name: draft.customerName ?? null,
++      service_date: draft.serviceDate ?? null,
++      notes: draft.notes,
++    });
++    return draft;
++  }
++}
+diff --git a/src/lib/mapping.ts b/src/lib/mapping.ts
+index d49e4d8..2a8226e 100644
+--- a/src/lib/mapping.ts
++++ b/src/lib/mapping.ts
+@@ -142,6 +142,8 @@ export function mapWebhook(
+         amountCents: toCents(pick(data, "amount", "disputed_amount", "final_amount")),
+         currency: (pick<string>(data, "currency") ?? "usd").toLowerCase(),
+         occurredAt,
++        disputeId: pick<string>(data, "id", "dispute_id"),
++        paymentId: pick<string>(data, "payment_id", "payment.id"),
+       };
+     }
+ 
+diff --git a/src/lib/plan.ts b/src/lib/plan.ts
+new file mode 100644
+index 0000000..9d18dfb
+--- /dev/null
++++ b/src/lib/plan.ts
+@@ -0,0 +1,62 @@
++/**
++ * Recover Pro tier sync.
++ *
++ * Recover sells its own Pro plan on Recover's own Whop (PRO_COMPANY_ID /
++ * PRO_PLAN_ID). Until full checkout metadata wiring exists, a purchasing
++ * company's membership is expected to carry the installing company's id in
++ * `metadata.installing_company_id` — set at checkout time. This module
++ * live-checks that, caches the result on the company's config, and exposes a
++ * network-free cached read for use as a fallback.
++ */
++
++import type { RecoveryStore } from "../core/store";
++import type { Tier } from "../core/types";
++import { PRO_COMPANY_ID, PRO_PLAN_ID } from "./constants";
++import { whopClient } from "./whop";
++
++/** Cached read — no network call. Used as the fallback when the live check fails. */
++export async function cachedTier(
++  store: RecoveryStore,
++  companyId: string,
++): Promise<Tier> {
++  const cfg = await store.getConfig(companyId);
++  return cfg?.tier ?? "free";
++}
++
++/**
++ * Live-checks Recover's own memberships for an active Pro membership tagged
++ * with `companyId`, caches the result into the company's config, and returns
++ * it. Falls back to the cached tier (never silently downgrades) on any API
++ * failure, so a Whop outage never revokes Pro access.
++ */
++export async function syncProTier(
++  store: RecoveryStore,
++  companyId: string,
++): Promise<Tier> {
++  let tier: Tier;
++  try {
++    // Loosely typed — avoids a hard compile dependency on the SDK's evolving
++    // memberships.list generics, same rationale as WhopMessenger.
++    const page = await (whopClient() as any).memberships.list({
++      company_id: PRO_COMPANY_ID,
++      plan_id: PRO_PLAN_ID,
++      valid: true,
++      first: 50,
++    });
++    const match = (page?.data ?? []).some(
++      (m: any) => m?.metadata?.installing_company_id === companyId,
++    );
++    tier = match ? "pro" : "free";
++  } catch {
++    return cachedTier(store, companyId);
++  }
++
++  const existing = await store.getConfig(companyId);
++  const cfg = existing ?? {
++    companyId,
++    enabled: true,
++    communityName: "your community",
++  };
++  await store.saveConfig({ ...cfg, tier });
++  return tier;
++}
+diff --git a/src/lib/runtime.ts b/src/lib/runtime.ts
+index d251d6a..5062fb7 100644
+--- a/src/lib/runtime.ts
++++ b/src/lib/runtime.ts
+@@ -1,11 +1,14 @@
+ /**
+  * Assembles the engine from environment config. Chooses a real Whop messenger
+- * or a mock one based on MESSENGER_MODE, and a persistent file store.
++ * (and, on Pro, a real Whop evidence drafter) or mock ones based on
++ * MESSENGER_MODE, and a persistent file store.
+  */
+ 
++import type { EvidenceDrafter } from "../core/evidence";
+ import { RecoveryEngine } from "../core/engine";
+ import { MockMessenger, WhopMessenger, type Messenger } from "../core/messaging";
+ import type { RecoveryStore } from "../core/store";
++import { WhopEvidenceDrafter } from "./disputes";
+ import { FileStore } from "./store-file";
+ import { whopClient } from "./whop";
+ 
+@@ -25,12 +28,21 @@ function getMessenger(): Messenger {
+   return new MockMessenger();
+ }
+ 
++function getEvidenceDrafter(): EvidenceDrafter | undefined {
++  const mode = (process.env.MESSENGER_MODE ?? "mock").toLowerCase();
++  if (mode === "whop") {
++    return new WhopEvidenceDrafter(whopClient() as any);
++  }
++  return undefined;
++}
++
+ export function getEngine(): RecoveryEngine {
+   if (_engine) return _engine;
+   _engine = new RecoveryEngine({
+     store: getStore(),
+     messenger: getMessenger(),
+     appBaseUrl: process.env.APP_BASE_URL ?? "http://localhost:3000",
++    evidenceDrafter: getEvidenceDrafter(),
+   });
+   return _engine;
+ }
+diff --git a/test/simulate.ts b/test/simulate.ts
+index 43aee88..df730e3 100644
+--- a/test/simulate.ts
++++ b/test/simulate.ts
+@@ -11,6 +11,7 @@
+  */
+ 
+ import { RecoveryEngine } from "../src/core/engine.js";
++import { MockEvidenceDrafter } from "../src/core/evidence.js";
+ import { MockMessenger } from "../src/core/messaging.js";
+ import { InMemoryStore } from "../src/core/store.js";
+ import { computeMetrics } from "../src/core/revenue.js";
+@@ -50,11 +51,13 @@ async function main() {
+   const clock = new FakeClock(Date.parse("2026-07-01T00:00:00.000Z"));
+   const store = new InMemoryStore();
+   const messenger = new MockMessenger();
++  const evidenceDrafter = new MockEvidenceDrafter();
+   const engine = new RecoveryEngine({
+     store,
+     messenger,
+     clock,
+     appBaseUrl: "https://recover.app",
++    evidenceDrafter,
+   });
+ 
+   await store.saveConfig({
+@@ -206,6 +209,146 @@ async function main() {
+     alerts.some((a) => a.kind === "chargeback" && a.severity === "critical"),
+     "chargeback alert stored as critical",
+   );
++  const chargebackAlert = alerts.find((a) => a.kind === "chargeback");
++  assert(
++    chargebackAlert?.evidenceStatus === "not_applicable",
++    "free tier: chargeback alert has evidenceStatus=not_applicable",
++  );
++  assert(
++    evidenceDrafter.drafted.length === 0,
++    "free tier: evidence drafter is never invoked",
++  );
++
++  console.log(
++    "\n\x1b[1mScenario D.2 — Recover Pro auto-drafts dispute evidence\x1b[0m",
++  );
++  const PRO_COMPANY = "biz_beta";
++  await store.saveConfig({
++    companyId: PRO_COMPANY,
++    enabled: true,
++    communityName: "Beta Circle",
++    tier: "pro",
++  });
++
++  const disputeEvt1: EngineEvent = {
++    kind: "dispute_created",
++    eventId: "evt_dispute_pro_1",
++    companyId: PRO_COMPANY,
++    membershipId: "mem_pro_1",
++    username: "pro_member",
++    amountCents: 19900,
++    currency: "usd",
++    occurredAt: clock.iso(),
++    disputeId: "dspt_pro_1",
++    paymentId: "pay_pro_1",
++  };
++  const dPro1 = await engine.handle(disputeEvt1);
++  assert(dPro1.action === "alert_created", "pro tier: dispute_created raises an alert");
++  assert(
++    evidenceDrafter.drafted.some((d) => d.disputeId === "dspt_pro_1"),
++    "pro tier: evidence auto-drafted for the dispute",
++  );
++  const proAlerts1 = await store.listAlertsByCompany(PRO_COMPANY);
++  const proAlert1 = proAlerts1.find((a) => a.disputeId === "dspt_pro_1");
++  assert(
++    proAlert1?.evidenceStatus === "drafted",
++    "pro tier: alert marked evidenceStatus=drafted",
++  );
++
++  // Failure path — drafter throws, alert should still be raised but flagged failed.
++  evidenceDrafter.shouldFail = true;
++  const disputeEvt2: EngineEvent = {
++    kind: "dispute_created",
++    eventId: "evt_dispute_pro_2",
++    companyId: PRO_COMPANY,
++    membershipId: "mem_pro_2",
++    username: "pro_member_2",
++    amountCents: 5900,
++    currency: "usd",
++    occurredAt: clock.iso(),
++    disputeId: "dspt_pro_2",
++  };
++  const dPro2 = await engine.handle(disputeEvt2);
++  assert(
++    dPro2.action === "alert_created",
++    "pro tier: alert still raised even if the draft call fails",
++  );
++  const proAlerts2 = await store.listAlertsByCompany(PRO_COMPANY);
++  const proAlert2 = proAlerts2.find((a) => a.disputeId === "dspt_pro_2");
++  assert(
++    proAlert2?.evidenceStatus === "failed",
++    "pro tier: draft failure recorded as evidenceStatus=failed",
++  );
++  evidenceDrafter.shouldFail = false;
++
++  // Retro-draft: a free-tier company gets a dispute (not_applicable), then upgrades.
++  const RETRO_COMPANY = "biz_gamma";
++  await store.saveConfig({
++    companyId: RETRO_COMPANY,
++    enabled: true,
++    communityName: "Gamma Guild",
++  });
++  const retroDisputeEvt: EngineEvent = {
++    kind: "dispute_created",
++    eventId: "evt_dispute_retro_1",
++    companyId: RETRO_COMPANY,
++    username: "retro_member",
++    amountCents: 3300,
++    currency: "usd",
++    occurredAt: clock.iso(),
++    disputeId: "dspt_retro_1",
++  };
++  await engine.handle(retroDisputeEvt);
++  const beforeUpgrade = await store.listAlertsByCompany(RETRO_COMPANY);
++  assert(
++    beforeUpgrade.find((a) => a.disputeId === "dspt_retro_1")?.evidenceStatus ===
++      "not_applicable",
++    "retro: dispute raised before upgrade has evidenceStatus=not_applicable",
++  );
++
++  await store.saveConfig({
++    companyId: RETRO_COMPANY,
++    enabled: true,
++    communityName: "Gamma Guild",
++    tier: "pro",
++  });
++  const draftedBeforeRetro = evidenceDrafter.drafted.length;
++  const retroResult = await engine.handle({
++    kind: "pro_tier_confirmed",
++    eventId: "evt_pro_confirmed_1",
++    companyId: RETRO_COMPANY,
++    occurredAt: clock.iso(),
++  });
++  assert(
++    retroResult.action === "evidence_retro_drafted",
++    "retro: pro_tier_confirmed retro-drafts pending disputes",
++  );
++  const afterUpgrade = await store.listAlertsByCompany(RETRO_COMPANY);
++  assert(
++    afterUpgrade.find((a) => a.disputeId === "dspt_retro_1")?.evidenceStatus ===
++      "drafted",
++    "retro: pending dispute is now marked evidenceStatus=drafted",
++  );
++  assert(
++    evidenceDrafter.drafted.length === draftedBeforeRetro + 1,
++    "retro: exactly one new draft was recorded",
++  );
++
++  // Dedup: running pro_tier_confirmed again should not re-draft already-drafted alerts.
++  const retroResult2 = await engine.handle({
++    kind: "pro_tier_confirmed",
++    eventId: "evt_pro_confirmed_2",
++    companyId: RETRO_COMPANY,
++    occurredAt: clock.iso(),
++  });
++  assert(
++    retroResult2.action === "noop",
++    "retro: re-running pro_tier_confirmed with nothing pending is a noop",
++  );
++  assert(
++    evidenceDrafter.drafted.length === draftedBeforeRetro + 1,
++    "retro: no duplicate draft calls on the second run",
++  );
+ 
+   console.log("\n\x1b[1mScenario E — at-risk scan flags a disengaged member\x1b[0m");
+   const assessments = await engine.scanAtRisk(COMPANY, [
