@@ -59,5 +59,7 @@ export default async function CompanyDashboard({
     syncProTier(store, companyId).catch(() => cachedTier(store, companyId)),
   ]);
 
-  return <DashboardView cases={cases} alerts={alerts} tier={tier} />;
+  return (
+    <DashboardView cases={cases} alerts={alerts} tier={tier} companyId={companyId} />
+  );
 }

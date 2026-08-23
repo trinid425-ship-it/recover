@@ -8,6 +8,7 @@
 import { computeMetrics } from "@/core/revenue";
 import { formatAmount } from "@/core/sequences";
 import type { Alert, RecoveryCase, Tier } from "@/core/types";
+import { UpgradeProButton } from "./UpgradeProButton";
 
 const STATUS_STYLE: Record<string, { bg: string; fg: string; label: string }> = {
   recovered: { bg: "#0f2e1c", fg: "#4ade80", label: "Recovered" },
@@ -65,10 +66,13 @@ export function DashboardView({
   cases,
   alerts,
   tier = "free",
+  companyId,
 }: {
   cases: RecoveryCase[];
   alerts: Alert[];
   tier?: Tier;
+  /** Present on the Whop-embedded dashboard; omitted on the standalone demo. */
+  companyId?: string;
 }) {
   const recoveryCases = cases.filter((c) => c.type === "involuntary");
   const winbackCases = cases.filter((c) => c.type === "winback");
@@ -115,6 +119,9 @@ export function DashboardView({
         >
           {tier === "pro" ? "PRO" : "FREE"}
         </span>
+        {tier === "free" && companyId ? (
+          <UpgradeProButton companyId={companyId} />
+        ) : null}
       </div>
       <p style={{ color: "#8b95a5", marginTop: 0, marginBottom: 24 }}>
         Failed payments recovered, members won back, and risks flagged —

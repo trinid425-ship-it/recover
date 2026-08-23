@@ -17,6 +17,8 @@ import { InMemoryStore } from "../src/core/store.js";
 import { computeMetrics } from "../src/core/revenue.js";
 import { DEFAULT_STEPS } from "../src/core/sequences.js";
 import type { Clock, EngineEvent } from "../src/core/types.js";
+import { mapWebhook } from "../src/lib/mapping.js";
+import { PRO_PLAN_ID, PRO_COMPANY_ID } from "../src/lib/constants.js";
 
 // ── tiny test helpers ─────────────────────────────────────────────────────
 let passed = 0;
@@ -348,6 +350,88 @@ async function main() {
   assert(
     evidenceDrafter.drafted.length === draftedBeforeRetro + 1,
     "retro: no duplicate draft calls on the second run",
+  );
+
+  console.log(
+    "\n\x1b[1mScenario D.3 — pro_tier_confirmed persists tier on its own\x1b[0m",
+  );
+  const PURCHASE_COMPANY = "biz_delta";
+  // No saveConfig call here — this company has no config on file yet, mirroring
+  // a real first-time Pro purchase where the checkout webhook is the very
+  // first event Recover ever sees for this companyId.
+  const purchaseResult = await engine.handle({
+    kind: "pro_tier_confirmed",
+    eventId: "evt_pro_confirmed_purchase_1",
+    companyId: PURCHASE_COMPANY,
+    occurredAt: clock.iso(),
+  });
+  assert(
+    purchaseResult.action === "noop",
+    "pro_tier_confirmed with nothing pending is a noop action",
+  );
+  const purchaseCfg = await store.getConfig(PURCHASE_COMPANY);
+  assert(
+    purchaseCfg?.tier === "pro",
+    "pro_tier_confirmed persists tier=pro even with no prior config",
+  );
+
+  const draftedBeforePurchase = evidenceDrafter.drafted.length;
+  const purchaseDispute = await engine.handle({
+    kind: "dispute_created",
+    eventId: "evt_dispute_purchase_1",
+    companyId: PURCHASE_COMPANY,
+    membershipId: "mem_purchase_1",
+    username: "purchase_member",
+    amountCents: 2200,
+    currency: "usd",
+    occurredAt: clock.iso(),
+    disputeId: "dspt_purchase_1",
+  });
+  assert(
+    purchaseDispute.action === "alert_created",
+    "post-purchase: dispute_created raises an alert without re-setting tier",
+  );
+  const purchaseAlerts = await store.listAlertsByCompany(PURCHASE_COMPANY);
+  assert(
+    purchaseAlerts.find((a) => a.disputeId === "dspt_purchase_1")
+      ?.evidenceStatus === "drafted",
+    "post-purchase: the persisted tier alone is enough to auto-draft evidence",
+  );
+  assert(
+    evidenceDrafter.drafted.length === draftedBeforePurchase + 1,
+    "post-purchase: exactly one new draft was recorded",
+  );
+
+  console.log(
+    "\n\x1b[1mScenario D.4 — webhook mapping re-targets Pro purchases to the installing company\x1b[0m",
+  );
+  const proWebhookEvt = mapWebhook("payment.succeeded", {
+    id: "pay_pro_webhook_1",
+    company_id: PRO_COMPANY_ID, // the webhook always arrives on Recover's own company
+    created_at: clock.iso(),
+    plan: { id: PRO_PLAN_ID },
+    metadata: { installing_company_id: "biz_epsilon" },
+  });
+  assert(
+    proWebhookEvt?.kind === "pro_tier_confirmed",
+    "mapWebhook turns a Pro-plan payment.succeeded into pro_tier_confirmed",
+  );
+  assert(
+    proWebhookEvt?.kind === "pro_tier_confirmed" &&
+      proWebhookEvt.companyId === "biz_epsilon",
+    "mapWebhook re-targets the event at the installing company, not PRO_COMPANY_ID",
+  );
+
+  const ordinaryWebhookEvt = mapWebhook("payment.succeeded", {
+    id: "pay_ordinary_1",
+    company_id: COMPANY,
+    membership_id: "mem_1",
+    created_at: clock.iso(),
+    plan: { id: "plan_unrelated" },
+  });
+  assert(
+    ordinaryWebhookEvt?.kind === "payment_succeeded",
+    "mapWebhook leaves non-Pro payments mapped as ordinary payment_succeeded",
   );
 
   console.log("\n\x1b[1mScenario E — at-risk scan flags a disengaged member\x1b[0m");

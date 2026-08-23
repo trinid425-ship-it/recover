@@ -10,6 +10,7 @@
  */
 
 import type { EngineEvent } from "../core/types";
+import { PRO_PLAN_ID } from "./constants";
 
 type AnyRecord = Record<string, any>;
 
@@ -77,6 +78,26 @@ export function mapWebhook(
 
     case "payment.succeeded":
     case "payment_succeeded": {
+      // Recover Pro purchase: this webhook always arrives on PRO_COMPANY_ID's
+      // account (that's whose plan was sold), so `companyId` above is Recover's
+      // own company, not the installing one. The installing company travels in
+      // checkout metadata instead — payments inherit their checkout
+      // configuration's metadata (see lib/pro-checkout.ts) — so pull it from
+      // there and re-target the event at that company.
+      const installingCompanyId = pick<string>(
+        data,
+        "metadata.installing_company_id",
+      );
+      const planId = pick<string>(data, "plan.id", "plan_id");
+      if (installingCompanyId && planId === PRO_PLAN_ID) {
+        return {
+          kind: "pro_tier_confirmed",
+          eventId,
+          companyId: installingCompanyId,
+          occurredAt,
+        };
+      }
+
       const membershipId = pick<string>(
         data,
         "membership_id",

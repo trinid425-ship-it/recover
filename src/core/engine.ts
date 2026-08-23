@@ -305,14 +305,27 @@ export class RecoveryEngine {
   }
 
   /**
-   * Retro-drafts evidence for any open, un-drafted chargeback alerts once a
-   * company confirms its Recover Pro upgrade (e.g. mid-dispute).
+   * Confirms a company's Recover Pro upgrade: persists tier="pro" on their
+   * config — the source of truth onDisputeCreated reads via `cfg?.tier` — then
+   * retro-drafts evidence for any open, un-drafted chargeback alerts (e.g. the
+   * upgrade landed mid-dispute). Idempotent: safe to replay.
    */
   private async onProTierConfirmed(
     evt: Extract<EngineEvent, { kind: "pro_tier_confirmed" }>,
   ): Promise<HandleResult> {
+    const existing = await this.config(evt.companyId);
+    const cfg: CompanyConfig = existing
+      ? { ...existing, tier: "pro" }
+      : {
+          companyId: evt.companyId,
+          enabled: true,
+          communityName: "your community",
+          tier: "pro",
+        };
+    await this.store.saveConfig(cfg);
+
     if (!this.evidenceDrafter) {
-      return { applied: false, action: "noop" };
+      return { applied: true, action: "noop" };
     }
 
     const alerts = await this.store.listAlertsByCompany(evt.companyId);
@@ -323,10 +336,9 @@ export class RecoveryEngine {
         a.evidenceStatus !== "drafted",
     );
     if (pending.length === 0) {
-      return { applied: false, action: "noop" };
+      return { applied: true, action: "noop" };
     }
 
-    const cfg = await this.config(evt.companyId);
     let draftedAny = false;
     for (const a of pending) {
       try {
