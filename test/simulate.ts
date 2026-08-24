@@ -18,6 +18,7 @@ import { computeMetrics } from "../src/core/revenue.js";
 import { DEFAULT_STEPS } from "../src/core/sequences.js";
 import type { Clock, EngineEvent } from "../src/core/types.js";
 import { mapWebhook } from "../src/lib/mapping.js";
+import { verifyWhopWebhook, WebhookVerificationError } from "../src/lib/verify-webhook.js";
 import { PRO_PLAN_ID, PRO_COMPANY_ID } from "../src/lib/constants.js";
 
 // ── tiny test helpers ─────────────────────────────────────────────────────
@@ -470,6 +471,58 @@ async function main() {
     alerts2.some((a) => a.kind === "at_risk"),
     "high-risk member generates an at-risk alert",
   );
+
+  console.log("\n\x1b[1mScenario F — webhook signature verification (ws_ secret format)\x1b[0m");
+  {
+    const secret = "ws_testsecret0123456789abcdef0123456789abcdef0123456789abcdef01";
+    const payload = JSON.stringify({ type: "payment.succeeded", data: { id: "pay_test" } });
+    const id = "msg_test123";
+    const timestamp = Math.floor(Date.now() / 1000);
+    const toSign = `${id}.${timestamp}.${payload}`;
+    const enc = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      "raw",
+      enc.encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const sigBuf = await crypto.subtle.sign("HMAC", key, enc.encode(toSign));
+    const sig = Buffer.from(sigBuf).toString("base64");
+    const headers = {
+      "webhook-id": id,
+      "webhook-timestamp": String(timestamp),
+      "webhook-signature": `v1,${sig}`,
+    };
+
+    const verified = await verifyWhopWebhook(payload, headers, secret);
+    assert(verified.type === "payment.succeeded", "valid ws_ signature verifies and parses payload");
+
+    let tamperedThrew = false;
+    try {
+      await verifyWhopWebhook(payload.replace("pay_test", "pay_evil"), headers, secret);
+    } catch (e) {
+      tamperedThrew = e instanceof WebhookVerificationError;
+    }
+    assert(tamperedThrew, "tampered payload fails signature verification");
+
+    let wrongSecretThrew = false;
+    try {
+      await verifyWhopWebhook(payload, headers, "ws_wrongsecret00000000000000000000000000000000000000000000000");
+    } catch (e) {
+      wrongSecretThrew = e instanceof WebhookVerificationError;
+    }
+    assert(wrongSecretThrew, "wrong secret fails signature verification");
+
+    let staleThrew = false;
+    try {
+      const staleHeaders = { ...headers, "webhook-timestamp": String(timestamp - 3600) };
+      await verifyWhopWebhook(payload, staleHeaders, secret);
+    } catch (e) {
+      staleThrew = e instanceof WebhookVerificationError;
+    }
+    assert(staleThrew, "stale timestamp (>5min old) rejected");
+  }
 
   console.log("\n\x1b[1mMetrics\x1b[0m");
   const all = await store.listCasesByCompany(COMPANY);
