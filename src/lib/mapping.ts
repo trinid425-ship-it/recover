@@ -14,7 +14,7 @@ import { PRO_PLAN_ID } from "./constants";
 
 type AnyRecord = Record<string, any>;
 
-function pick<T = string>(obj: AnyRecord, ...keys: string[]): T | undefined {
+export function pick<T = string>(obj: AnyRecord, ...keys: string[]): T | undefined {
   for (const k of keys) {
     const v = k.split(".").reduce<any>((o, part) => (o == null ? o : o[part]), obj);
     if (v !== undefined && v !== null) return v as T;
@@ -22,7 +22,7 @@ function pick<T = string>(obj: AnyRecord, ...keys: string[]): T | undefined {
   return undefined;
 }
 
-function toCents(amount: unknown): number {
+export function toCents(amount: unknown): number {
   if (typeof amount === "number") {
     // Whop amounts may be decimal dollars; normalize to integer cents.
     return Number.isInteger(amount) && amount > 1000

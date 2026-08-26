@@ -81,6 +81,19 @@ export interface CompanyConfig {
   refundPolicyDisclosure?: string;
   cancellationPolicyDisclosure?: string;
   productDescription?: string;
+  /** User to DM with the weekly revenue-saved digest. Set the first time an
+   *  admin opens the dashboard (see dashboard/[companyId]/page.tsx). */
+  notifyUserId?: string;
+  /** Whether the weekly digest DM is on. Defaults to true once notifyUserId is set. */
+  digestEnabled?: boolean;
+  /** ISO timestamp of the last historical backfill scan, or unset if never run. */
+  historicalScanAt?: string;
+  /** Outcome of the last backfill scan, shown on the dashboard. */
+  lastScanResult?: {
+    scanned: number;
+    opened: number;
+    skipped: number;
+  };
 }
 
 /** Normalized inbound event the engine understands (mapped from Whop webhooks). */

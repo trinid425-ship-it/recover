@@ -6,8 +6,10 @@
  */
 
 import { computeMetrics } from "@/core/revenue";
-import { formatAmount } from "@/core/sequences";
+import { DEFAULT_STEPS, formatAmount } from "@/core/sequences";
 import type { Alert, RecoveryCase, Tier } from "@/core/types";
+import { ScanPanel } from "./ScanPanel";
+import { SettingsPanel } from "./SettingsPanel";
 import { UpgradeProButton } from "./UpgradeProButton";
 
 const STATUS_STYLE: Record<string, { bg: string; fg: string; label: string }> = {
@@ -67,12 +69,22 @@ export function DashboardView({
   alerts,
   tier = "free",
   companyId,
+  communityName = "your community",
+  customTemplates,
+  digestEnabled = true,
+  historicalScanAt,
+  lastScanResult,
 }: {
   cases: RecoveryCase[];
   alerts: Alert[];
   tier?: Tier;
   /** Present on the Whop-embedded dashboard; omitted on the standalone demo. */
   companyId?: string;
+  communityName?: string;
+  customTemplates?: string[];
+  digestEnabled?: boolean;
+  historicalScanAt?: string;
+  lastScanResult?: { scanned: number; opened: number; skipped: number };
 }) {
   const recoveryCases = cases.filter((c) => c.type === "involuntary");
   const winbackCases = cases.filter((c) => c.type === "winback");
@@ -127,6 +139,14 @@ export function DashboardView({
         Failed payments recovered, members won back, and risks flagged —
         automatically.
       </p>
+
+      {companyId ? (
+        <ScanPanel
+          companyId={companyId}
+          alreadyScannedAt={historicalScanAt}
+          initialResult={lastScanResult}
+        />
+      ) : null}
 
       {openAlerts.length > 0 && (
         <div
@@ -284,6 +304,17 @@ export function DashboardView({
           })
         )}
       </div>
+
+      {companyId ? (
+        <SettingsPanel
+          companyId={companyId}
+          initialCommunityName={communityName}
+          initialTemplates={
+            customTemplates ?? DEFAULT_STEPS.map((s) => s.template)
+          }
+          initialDigestEnabled={digestEnabled}
+        />
+      ) : null}
     </main>
   );
 }

@@ -53,13 +53,38 @@ export default async function CompanyDashboard({
   }
 
   const store = getStore();
-  const [cases, alerts, tier] = await Promise.all([
+  const [cases, alerts, tier, config] = await Promise.all([
     store.listCasesByCompany(companyId),
     store.listAlertsByCompany(companyId),
     syncProTier(store, companyId).catch(() => cachedTier(store, companyId)),
+    store.getConfig(companyId),
   ]);
 
+  // First time an admin opens the dashboard, capture who to send the weekly
+  // digest DM to. Never overwrites a value that's already set — an admin
+  // who later opts out shouldn't get silently re-subscribed by a teammate's
+  // visit.
+  if (!config?.notifyUserId) {
+    await store.saveConfig({
+      companyId,
+      enabled: true,
+      communityName: "your community",
+      ...config,
+      notifyUserId: viewer.userId,
+    });
+  }
+
   return (
-    <DashboardView cases={cases} alerts={alerts} tier={tier} companyId={companyId} />
+    <DashboardView
+      cases={cases}
+      alerts={alerts}
+      tier={tier}
+      companyId={companyId}
+      communityName={config?.communityName ?? "your community"}
+      customTemplates={config?.customTemplates}
+      digestEnabled={config?.digestEnabled ?? true}
+      historicalScanAt={config?.historicalScanAt}
+      lastScanResult={config?.lastScanResult}
+    />
   );
 }

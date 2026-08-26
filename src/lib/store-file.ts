@@ -71,6 +71,10 @@ export class FileStore implements RecoveryStore {
     db.configs[c.companyId] = c;
     await write(db);
   }
+  async listCompanyIds(): Promise<string[]> {
+    const db = await read();
+    return Object.keys(db.configs);
+  }
   async saveAlert(a: Alert): Promise<void> {
     const db = await read();
     db.alerts[a.id] = a;

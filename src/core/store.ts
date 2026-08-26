@@ -16,6 +16,9 @@ export interface RecoveryStore {
 
   getConfig(companyId: string): Promise<CompanyConfig | null>;
   saveConfig(c: CompanyConfig): Promise<void>;
+  /** Every company that has a config on file — i.e. every install. Used to
+   *  fan the weekly digest cron out across all installed companies. */
+  listCompanyIds(): Promise<string[]>;
 
   saveAlert(a: Alert): Promise<void>;
   getAlert(id: string): Promise<Alert | null>;
@@ -65,6 +68,10 @@ export class InMemoryStore implements RecoveryStore {
 
   async saveConfig(c: CompanyConfig): Promise<void> {
     this.configs.set(c.companyId, structuredClone(c));
+  }
+
+  async listCompanyIds(): Promise<string[]> {
+    return [...this.configs.keys()];
   }
 
   async saveAlert(a: Alert): Promise<void> {

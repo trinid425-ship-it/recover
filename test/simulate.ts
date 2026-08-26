@@ -15,9 +15,11 @@ import { MockEvidenceDrafter } from "../src/core/evidence.js";
 import { MockMessenger } from "../src/core/messaging.js";
 import { InMemoryStore } from "../src/core/store.js";
 import { computeMetrics } from "../src/core/revenue.js";
-import { DEFAULT_STEPS } from "../src/core/sequences.js";
+import { DEFAULT_STEPS, resolveSteps } from "../src/core/sequences.js";
+import { buildWeeklyDigest, hasDigestActivity, renderDigestMessage } from "../src/core/digest.js";
 import type { Clock, EngineEvent } from "../src/core/types.js";
 import { mapWebhook } from "../src/lib/mapping.js";
+import { isBackfillCandidate, mapPaymentToFailedEvent } from "../src/lib/backfill-mapping.js";
 import { verifyWhopWebhook, WebhookVerificationError } from "../src/lib/verify-webhook.js";
 import { PRO_PLAN_ID, PRO_COMPANY_ID } from "../src/lib/constants.js";
 
@@ -522,6 +524,198 @@ async function main() {
       staleThrew = e instanceof WebhookVerificationError;
     }
     assert(staleThrew, "stale timestamp (>5min old) rejected");
+  }
+
+  console.log("\n\x1b[1mScenario G — historical scan backfills pre-existing failures\x1b[0m");
+  {
+    // A payment already sitting in the "open, retried, unpaid" state before
+    // Recover was ever installed — exactly what /payments returns for a
+    // company that already had churn leaking before install.
+    const openFailingPayment = {
+      id: "pay_backfill_1",
+      status: "open",
+      payments_failed: 2,
+      failure_message: "Your card was declined.",
+      total: 49,
+      currency: "usd",
+      created_at: clock.iso(),
+      last_payment_attempt: clock.iso(),
+      user: { id: "user_backfill_1", username: "preexisting_member" },
+      membership: { id: "mem_backfill_1" },
+      product: { title: "Pro Monthly" },
+    };
+    assert(
+      isBackfillCandidate(openFailingPayment),
+      "an open payment with failed attempts is a backfill candidate",
+    );
+
+    const healthyOpenPayment = { id: "pay_ok_1", status: "open", payments_failed: 0 };
+    assert(
+      !isBackfillCandidate(healthyOpenPayment),
+      "an open payment with zero failed attempts is NOT a backfill candidate",
+    );
+
+    const paidPayment = { id: "pay_paid_1", status: "paid", payments_failed: 1 };
+    assert(
+      !isBackfillCandidate(paidPayment),
+      "a paid payment is never a backfill candidate regardless of past attempts",
+    );
+
+    const mapped = mapPaymentToFailedEvent(COMPANY, openFailingPayment);
+    assert(mapped?.kind === "payment_failed", "backfilled payment maps to a payment_failed event");
+    assert(
+      mapped?.kind === "payment_failed" && mapped.amountCents === 4900,
+      "backfill mapping converts $49 decimal dollars to 4900 cents",
+    );
+    assert(
+      mapped?.kind === "payment_failed" && mapped.member.username === "preexisting_member",
+      "backfill mapping carries the member's username through",
+    );
+
+    const missingIdentity = mapPaymentToFailedEvent(COMPANY, { id: "pay_x", status: "open" });
+    assert(missingIdentity === null, "a payment with no membership/user id maps to null, not a crash");
+
+    // Feed the mapped event through the real engine, exactly like backfill.ts does.
+    const beforeBackfill = messenger.sent.length;
+    const backfillResult = await engine.handle(mapped!);
+    assert(backfillResult.action === "opened", "backfilled event opens a real recovery case");
+    assert(messenger.sent.length === beforeBackfill + 1, "backfilled case sends its first DM immediately, same as a live failure");
+
+    // Re-running the exact same scan (same payment, same eventId) must be a no-op.
+    const rescan = await engine.handle(mapPaymentToFailedEvent(COMPANY, openFailingPayment)!);
+    assert(rescan.action === "duplicate_ignored", "scanning the same payment twice never double-opens or double-DMs");
+    assert(messenger.sent.length === beforeBackfill + 1, "no extra DM sent on rescan");
+  }
+
+  console.log("\n\x1b[1mScenario H — weekly digest summarizes real activity\x1b[0m");
+  {
+    // Build fresh cases anchored to "now" — the earlier scenarios' cases are
+    // real but many days stale by this point in simulated time, so a
+    // windowed digest correctly excludes them. Test the window itself with
+    // data actually inside it.
+    const now = clock.now();
+    const inWindow = (daysAgo: number) => new Date(now.getTime() - daysAgo * 86_400_000).toISOString();
+    const digestCases = [
+      {
+        id: "rc_digest_1",
+        companyId: COMPANY,
+        type: "involuntary" as const,
+        member: { membershipId: "mem_d1", userId: "user_d1", username: "digest_recovered" },
+        amountCents: 4900,
+        currency: "usd",
+        planName: "Pro Monthly",
+        status: "recovered" as const,
+        failedAt: inWindow(3),
+        recoveredAt: inWindow(2),
+        attemptsSent: 1,
+        nextActionAt: null,
+        updateUrl: "https://recover.app/r",
+        messageLog: [],
+        appliedEventIds: [],
+      },
+      {
+        id: "rc_digest_2",
+        companyId: COMPANY,
+        type: "involuntary" as const,
+        member: { membershipId: "mem_d2", userId: "user_d2", username: "digest_active" },
+        amountCents: 9900,
+        currency: "usd",
+        planName: "VIP Monthly",
+        status: "active" as const,
+        failedAt: inWindow(1),
+        attemptsSent: 1,
+        nextActionAt: inWindow(-1),
+        updateUrl: "https://recover.app/r",
+        messageLog: [],
+        appliedEventIds: [],
+      },
+      {
+        // Outside the 7-day window — must NOT be counted.
+        id: "rc_digest_stale",
+        companyId: COMPANY,
+        type: "involuntary" as const,
+        member: { membershipId: "mem_d3", userId: "user_d3", username: "digest_stale" },
+        amountCents: 100_00,
+        currency: "usd",
+        planName: "Pro Monthly",
+        status: "recovered" as const,
+        failedAt: inWindow(30),
+        recoveredAt: inWindow(29),
+        attemptsSent: 1,
+        nextActionAt: null,
+        updateUrl: "https://recover.app/r",
+        messageLog: [],
+        appliedEventIds: [],
+      },
+    ];
+
+    const summary = buildWeeklyDigest(digestCases, now, 7);
+    assert(summary.recoveredCount === 1, "digest counts only the in-window recovered case, not the 29-day-old one");
+    assert(summary.recoveredRevenueCents === 4900, "digest recovered revenue matches only the in-window $49 recovery");
+    assert(summary.activeCount === 1, "digest counts the currently-active case as a snapshot regardless of window");
+    assert(hasDigestActivity(summary), "a company with real activity has digest-worthy content");
+
+    const quietSummary = buildWeeklyDigest([], now, 7);
+    assert(!hasDigestActivity(quietSummary), "an empty case list has nothing digest-worthy — stays a signal, not noise");
+
+    const message = renderDigestMessage("Alpha Trades", summary);
+    assert(message.includes("Alpha Trades"), "digest message names the community");
+    assert(message.includes("Recovered"), "digest message reports recovered revenue");
+    assert(/\$\d/.test(message), "digest message formats amounts as currency");
+  }
+
+  console.log("\n\x1b[1mScenario I — white-labeled message templates override the default copy\x1b[0m");
+  {
+    // This is the shape /api/config now always writes (see route.ts): one
+    // entry per default step, blanks already resolved to that step's
+    // default text server-side. Verifies the settings-panel contract, not
+    // just the raw resolveSteps utility.
+    const brandedTemplates = DEFAULT_STEPS.map((s) => s.template);
+    brandedTemplates[0] = "Yo {username}, {plan} payment bounced — fix it: {updateUrl}";
+
+    const brandedSteps = resolveSteps({
+      companyId: "biz_branded",
+      enabled: true,
+      communityName: "Branded Co",
+      customTemplates: brandedTemplates,
+    });
+    assert(
+      brandedSteps[0]!.template.startsWith("Yo {username}"),
+      "a company's custom template overrides the default step-1 copy",
+    );
+    assert(
+      brandedSteps[1]!.template === DEFAULT_STEPS[1]!.template,
+      "steps left as the default text still render the default copy",
+    );
+    assert(
+      brandedSteps.length === DEFAULT_STEPS.length,
+      "a full-length custom template array keeps all 4 dunning touches",
+    );
+
+    const defaultSteps = resolveSteps({
+      companyId: "biz_unbranded",
+      enabled: true,
+      communityName: "Unbranded Co",
+    });
+    assert(
+      defaultSteps[0]!.template === DEFAULT_STEPS[0]!.template,
+      "a company with no custom templates gets Recover's default dunning copy untouched",
+    );
+
+    // Guard against the footgun /api/config now avoids: resolveSteps() sizes
+    // the sequence off whichever override array is shortest, so a
+    // short customTemplates array truncates the whole sequence. This is
+    // exactly why the route always pads to full length before saving.
+    const shortOverride = resolveSteps({
+      companyId: "biz_short",
+      enabled: true,
+      communityName: "Short Co",
+      customTemplates: ["only one override"],
+    });
+    assert(
+      shortOverride.length === 1,
+      "resolveSteps truncates to a short override array's length — the route must never save one",
+    );
   }
 
   console.log("\n\x1b[1mMetrics\x1b[0m");
